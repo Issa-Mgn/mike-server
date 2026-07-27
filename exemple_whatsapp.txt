@@ -1,0 +1,33 @@
+[21/01/2026, 10:23:15] Alice: Salut les amis ! Qui vient au ciné ce soir ?
+[21/01/2026, 10:25:42] Bob: Moi je peux ! C'est quoi le film ?
+[21/01/2026, 10:27:01] Alice: J'hésite entre le dernier Marvel et un truc d'auteur
+[21/01/2026, 10:28:33] Charlie: LOL Alice et ses "trucs d'auteur" 😂
+[21/01/2026, 10:29:45] Alice: Pardon de vouloir voir autre chose que des explosions hein
+[21/01/2026, 10:31:12] Bob: Les gars arrêtez de vous battre svp
+[21/01/2026, 10:32:55] Charlie: Qui se bat ? C'est juste Alice qui fait sa intellectuelle comme d'hab
+[21/01/2026, 10:34:21] Alice: Charlie franchement...
+[21/01/2026, 10:36:48] David: Yo les gens ! Désolé j'étais en cours. Vous parlez de quoi ?
+[21/01/2026, 10:38:15] Bob: Du ciné ce soir, t'es dispo ?
+[21/01/2026, 10:39:42] David: Ouais carrément ! J'arrive toujours en retard mais je serai là
+[21/01/2026, 10:41:03] Charlie: David en retard ? Quelle surprise mdrrr
+[21/01/2026, 10:42:29] David: Haha très drôle... C'est pas ma faute si le RER déconne
+[21/01/2026, 10:44:56] Alice: Bon on fait quoi alors ? Vote ?
+[21/01/2026, 10:46:12] Bob: Je propose Marvel, au moins tout le monde peut profiter
+[21/01/2026, 10:47:38] Charlie: +1 pour Marvel
+[21/01/2026, 10:49:05] Alice: Ok ok vous avez gagné...
+[21/01/2026, 10:50:22] David: Cool ! C'est à quelle heure ?
+[21/01/2026, 10:51:44] Bob: Y'a une séance à 20h30
+[21/01/2026, 10:53:01] Charlie: Parfait ! On se retrouve où ?
+[21/01/2026, 10:54:18] Alice: Devant le ciné à 20h15 ?
+[21/01/2026, 10:55:35] David: Moi je serai sûrement là vers 20h25... désolé d'avance
+[21/01/2026, 10:56:52] Charlie: Classique David 😂
+[21/01/2026, 10:58:09] Bob: Pas de soucis, on attendra
+[21/01/2026, 10:59:26] Alice: Bob t'es trop gentil avec lui
+[21/01/2026, 11:00:43] Bob: Bah c'est normal entre amis non ?
+[21/01/2026, 11:02:00] Charlie: Ouais enfin y'a des limites quand même
+[21/01/2026, 11:03:17] David: Les gars je suis là vous savez...
+[21/01/2026, 11:04:34] Alice: On rigole David t'inquiète
+[21/01/2026, 11:05:51] David: Ouais ouais... Bon je vous laisse je retourne en cours
+[21/01/2026, 11:07:08] Bob: À ce soir alors !
+[21/01/2026, 11:08:25] Charlie: Ciao les gens
+[21/01/2026, 11:09:42] Alice: Bisous tout le monde
