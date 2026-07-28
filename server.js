@@ -125,16 +125,17 @@ function canAnalyze(ip) {
  */
 function recordAnalysis(ip) {
   const now = Date.now();
-  const tomorrow = new Date();
-  tomorrow.setHours(24, 0, 0, 0); // Minuit du lendemain
+  // Calculer exactement 24h après l'analyse (pas minuit, mais même heure le lendemain)
+  const resetAt = now + (24 * 60 * 60 * 1000); // +24 heures
   
   ipTracking.set(ip, {
     count: 1,
     lastAnalysis: now,
-    resetAt: tomorrow.getTime()
+    resetAt: resetAt
   });
   
-  console.log(`📊 Analyse enregistrée pour IP: ${ip}, reset à ${tomorrow.toISOString()}`);
+  const resetDate = new Date(resetAt);
+  console.log(`📊 Analyse enregistrée pour IP: ${ip}, reset à ${resetDate.toISOString()}`);
 }
 
 async function processAnalysisQueue() {
