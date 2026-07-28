@@ -87,13 +87,25 @@ async function processAnalysisQueue() {
 }
 
 /**
- * Health check
+ * Health check - Route légère pour UptimeRobot
+ * Utilisée pour garder le serveur actif et éviter le cold start
  */
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok',
-    provider: process.env.LLM_PROVIDER || 'mistral'
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    provider: process.env.LLM_PROVIDER || 'mistral',
+    activeAnalysis: activeAnalysis,
+    queueLength: analysisQueue.length
   });
+});
+
+/**
+ * Ping endpoint ultra-léger pour UptimeRobot (alternative)
+ */
+app.get('/ping', (req, res) => {
+  res.send('pong');
 });
 
 /**
@@ -172,206 +184,300 @@ app.post('/api/parse', upload.single('conversation'), async (req, res) => {
 });
 
 /**
+ * Vérifier le statut d'une analyse
+ */
+app.get('/api/analysis/:analysisId/status', (req, res) => {
+  const { analysisId } = req.params;
+  
+  const analysis = analysisResults.get(analysisId);
+  
+  if (!analysis) {
+    return res.status(404).json({ 
+      status: 'not_found',
+      message: 'Analyse introuvable ou expirée' 
+    });
+  }
+  
+  res.json({
+    status: analysis.status,
+    hasResult: analysis.status === 'completed'
+  });
+});
+
+/**
+ * Récupérer les résultats d'une analyse terminée
+ */
+app.get('/api/analysis/:analysisId/result', (req, res) => {
+  const { analysisId } = req.params;
+  
+  const analysis = analysisResults.get(analysisId);
+  
+  if (!analysis) {
+    return res.status(404).json({ 
+      error: 'Analyse introuvable ou expirée' 
+    });
+  }
+  
+  if (analysis.status !== 'completed') {
+    return res.status(400).json({ 
+      error: 'Analyse non terminée',
+      status: analysis.status 
+    });
+  }
+  
+  // Retourner le résultat et le supprimer
+  const result = analysis.result;
+  analysisResults.delete(analysisId);
+  
+  res.json(result);
+});
+
+/**
  * Endpoint principal : analyse d'une conversation WhatsApp
  * Utilise une queue pour gérer jusqu'à 50 requêtes simultanées
+ * Retourne immédiatement un analysisId pour permettre le polling
  */
 app.post('/api/analyze', upload.single('conversation'), async (req, res) => {
-  // Ajouter à la queue et traiter
-  return new Promise((resolve) => {
-    const task = {
-      process: async () => {
-        let tempFilePath = null;
+  // Générer un ID unique pour cette analyse
+  const analysisId = require('crypto').randomUUID();
+  
+  console.log(`📥 Nouvelle analyse créée: ${analysisId}`);
+  console.log('   Fichier:', req.file ? req.file.originalname : 'aucun');
+  
+  if (!req.file) {
+    console.log('❌ Aucun fichier uploadé');
+    return res.status(400).json({ error: 'Aucun fichier uploadé' });
+  }
+  
+  // Initialiser le statut de l'analyse
+  analysisResults.set(analysisId, {
+    status: 'pending',
+    result: null,
+    timestamp: Date.now()
+  });
+  
+  // Retourner immédiatement l'ID au client
+  res.json({
+    success: true,
+    analysisId: analysisId,
+    message: 'Analyse démarrée'
+  });
+  
+  // Ajouter la tâche d'analyse à la queue
+  const task = {
+    process: async () => {
+      let tempFilePath = req.file.path;
 
-        try {
-          console.log('📥 Requête reçue (Active:', activeAnalysis, '/ Queue:', analysisQueue.length, ')');
-          console.log('   Fichier:', req.file ? req.file.originalname : 'aucun');
-          
-          if (!req.file) {
-            console.log('❌ Aucun fichier uploadé');
-            res.status(400).json({ error: 'Aucun fichier uploadé' });
-            return resolve();
-          }
+      try {
+        console.log(`🔄 Traitement analyse ${analysisId} (Active:`, activeAnalysis, '/ Queue:', analysisQueue.length, ')');
+        
+        // Mettre à jour le statut
+        const analysisData = analysisResults.get(analysisId);
+        if (analysisData) {
+          analysisData.status = 'processing';
+        }
 
-          tempFilePath = req.file.path;
+        // 1. Dézipper et extraire le .txt
+        const zip = new AdmZip(tempFilePath);
+        const zipEntries = zip.getEntries();
+        
+        const txtEntry = zipEntries.find(entry => 
+          entry.entryName.endsWith('.txt') && !entry.isDirectory
+        );
 
-          // 1. Dézipper et extraire le .txt
-          const zip = new AdmZip(tempFilePath);
-          const zipEntries = zip.getEntries();
-          
-          const txtEntry = zipEntries.find(entry => 
-            entry.entryName.endsWith('.txt') && !entry.isDirectory
-          );
-
-          if (!txtEntry) {
-            res.status(400).json({ 
+        if (!txtEntry) {
+          const analysisEntry = analysisResults.get(analysisId);
+          if (analysisEntry) {
+            analysisEntry.status = 'error';
+            analysisEntry.result = { 
               error: 'Aucun fichier .txt trouvé dans le .zip. Assurez-vous d\'avoir exporté correctement votre conversation WhatsApp.' 
-            });
-            return resolve();
+            };
+            analysisEntry.timestamp = Date.now();
           }
+          return null;
+        }
 
-          const txtContent = txtEntry.getData().toString('utf8');
+        const txtContent = txtEntry.getData().toString('utf8');
 
-          // 2. Parser le contenu WhatsApp
-          const messages = parseWhatsAppExport(txtContent);
+        // 2. Parser le contenu WhatsApp
+        const messages = parseWhatsAppExport(txtContent);
 
-          if (messages.length === 0) {
-            res.status(400).json({ 
+        if (messages.length === 0) {
+          const analysisEntry = analysisResults.get(analysisId);
+          if (analysisEntry) {
+            analysisEntry.status = 'error';
+            analysisEntry.result = { 
               error: 'Aucun message valide détecté. Vérifiez que le fichier est bien un export WhatsApp.' 
-            });
-            return resolve();
+            };
+            analysisEntry.timestamp = Date.now();
           }
+          return null;
+        }
 
-          const stats = extractStats(messages);
-          console.log(`📊 Conversation parsée : ${stats.totalMessages} messages, ${stats.participantCount} participants`);
+        const stats = extractStats(messages);
+        console.log(`📊 Conversation parsée : ${stats.totalMessages} messages, ${stats.participantCount} participants`);
 
-          // 3. Gérer le chunking si nécessaire pour analyser TOUS les messages
-          const chunking = chunkMessages(messages, 30000);
-          let summaries = null;
+        // 3. Gérer le chunking si nécessaire pour analyser TOUS les messages
+        const chunking = chunkMessages(messages, 30000);
+        let summaries = null;
 
-          const llmClient = new LLMClient();
+        const llmClient = new LLMClient();
 
-          if (chunking.needsChunking) {
-            console.log(`🔪 Chunking nécessaire : ${chunking.chunks.length} chunks`);
-            console.log(`📝 Phase 1 : Extraction des moments notables de ${chunking.chunks.length - 1} chunks...`);
-            summaries = [];
-            
-            // Extraire les moments notables de tous les chunks sauf le dernier
-            const chunksToAnalyze = chunking.chunks.slice(0, -1);
-            
-            for (let i = 0; i < chunksToAnalyze.length; i++) {
-              console.log(`   📦 Chunk ${i + 1}/${chunksToAnalyze.length}...`);
-              try {
-                const momentsJson = await llmClient.extractMoments(
-                  chunksToAnalyze[i], 
-                  i, 
-                  chunking.chunks.length
-                );
-                
-                // Parser le JSON des moments
-                const moments = JSON.parse(momentsJson.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim());
-                summaries.push(moments);
-                
-                // Afficher le nombre de moments trouvés
-                const momentCount = moments.moments ? moments.moments.length : 0;
-                console.log(`      ✅ ${momentCount} moments capturés`);
-                
-                // Petit délai entre requêtes
-                await new Promise(resolve => setTimeout(resolve, 100));
-              } catch (error) {
-                console.warn(`      ⚠️ Erreur sur chunk ${i + 1}: ${error.message}`);
-                summaries.push({ moments: [] });
-              }
+        if (chunking.needsChunking) {
+          console.log(`🔪 Chunking nécessaire : ${chunking.chunks.length} chunks`);
+          console.log(`📝 Phase 1 : Extraction des moments notables de ${chunking.chunks.length - 1} chunks...`);
+          summaries = [];
+          
+          // Extraire les moments notables de tous les chunks sauf le dernier
+          const chunksToAnalyze = chunking.chunks.slice(0, -1);
+          
+          for (let i = 0; i < chunksToAnalyze.length; i++) {
+            console.log(`   📦 Chunk ${i + 1}/${chunksToAnalyze.length}...`);
+            try {
+              const momentsJson = await llmClient.extractMoments(
+                chunksToAnalyze[i], 
+                i, 
+                chunking.chunks.length
+              );
+              
+              // Parser le JSON des moments
+              const moments = JSON.parse(momentsJson.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim());
+              summaries.push(moments);
+              
+              // Afficher le nombre de moments trouvés
+              const momentCount = moments.moments ? moments.moments.length : 0;
+              console.log(`      ✅ ${momentCount} moments capturés`);
+              
+              // Petit délai entre requêtes
+              await new Promise(resolve => setTimeout(resolve, 100));
+            } catch (error) {
+              console.warn(`      ⚠️ Erreur sur chunk ${i + 1}: ${error.message}`);
+              summaries.push({ moments: [] });
             }
-            
-            // Compter le total de moments extraits
-            const totalMoments = summaries.reduce((sum, s) => sum + (s.moments?.length || 0), 0);
-            console.log(`✅ Phase 1 terminée : ${totalMoments} moments extraits de ${summaries.length} chunks`);
-            console.log(`📨 Phase 2 : Analyse finale avec ${chunking.mostRecentChunk.length} messages récents...`);
           }
+          
+          // Compter le total de moments extraits
+          const totalMoments = summaries.reduce((sum, s) => sum + (s.moments?.length || 0), 0);
+          console.log(`✅ Phase 1 terminée : ${totalMoments} moments extraits de ${summaries.length} chunks`);
+          console.log(`📨 Phase 2 : Analyse finale avec ${chunking.mostRecentChunk.length} messages récents...`);
+        }
 
-          // 4. Construire le prompt Mike avec TOUS les messages (via résumés + dernier chunk)
-          const messagesForAnalysis = chunking.needsChunking 
-            ? chunking.mostRecentChunk 
-            : messages;
+        // 4. Construire le prompt Mike avec TOUS les messages (via résumés + dernier chunk)
+        const messagesForAnalysis = chunking.needsChunking 
+          ? chunking.mostRecentChunk 
+          : messages;
 
-          const mikePrompt = buildMikePrompt(messagesForAnalysis, summaries);
+        const mikePrompt = buildMikePrompt(messagesForAnalysis, summaries);
 
-          // 5. Appel au LLM (premier essai) avec fallback auto
-          console.log(`🤖 Appel au LLM pour l'analyse finale...`);
-          console.log(`📊 Utilisation de ${summaries ? summaries.length : 0} extraits de moments`);
-          let response = await llmClient.chat(
+        // 5. Appel au LLM (premier essai) avec fallback auto
+        console.log(`🤖 Appel au LLM pour l'analyse finale...`);
+        console.log(`📊 Utilisation de ${summaries ? summaries.length : 0} extraits de moments`);
+        let response = await llmClient.chat(
+          mikePrompt.system,
+          mikePrompt.user,
+          { 
+            jsonMode: true, 
+            temperature: 0.85,  // Plus créatif
+            maxTokens: 8000     // Encore plus de tokens pour des réponses ultra détaillées
+          }
+        );
+
+        // 6. Parser le JSON
+        let analysis;
+        try {
+          // Nettoyer la réponse (enlever markdown potentiel)
+          response = response.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+          analysis = JSON.parse(response);
+        } catch (parseError) {
+          console.warn('⚠️ JSON invalide, retry avec instruction renforcée...');
+          
+          // Retry avec instruction explicite
+          const retryPrompt = mikePrompt.user + '\n\nATTENTION : réponds UNIQUEMENT en JSON valide, sans texte avant/après, sans balises markdown.';
+          response = await llmClient.chat(
             mikePrompt.system,
-            mikePrompt.user,
-            { 
-              jsonMode: true, 
-              temperature: 0.85,  // Plus créatif
-              maxTokens: 8000     // Encore plus de tokens pour des réponses ultra détaillées
-            }
+            retryPrompt,
+            { jsonMode: true, temperature: 0.8 }
           );
 
-          // 6. Parser le JSON
-          let analysis;
-          try {
-            // Nettoyer la réponse (enlever markdown potentiel)
-            response = response.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-            analysis = JSON.parse(response);
-          } catch (parseError) {
-            console.warn('⚠️ JSON invalide, retry avec instruction renforcée...');
-            
-            // Retry avec instruction explicite
-            const retryPrompt = mikePrompt.user + '\n\nATTENTION : réponds UNIQUEMENT en JSON valide, sans texte avant/après, sans balises markdown.';
-            response = await llmClient.chat(
-              mikePrompt.system,
-              retryPrompt,
-              { jsonMode: true, temperature: 0.8 }
-            );
+          response = response.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+          analysis = JSON.parse(response);
+        }
 
-            response = response.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-            analysis = JSON.parse(response);
-          }
+        // 7. Validation du schéma de base
+        if (!analysis.verdict_global || !analysis.participants || !Array.isArray(analysis.participants)) {
+          throw new Error('Schéma de réponse invalide');
+        }
 
-          // 7. Validation du schéma de base
-          if (!analysis.verdict_global || !analysis.participants || !Array.isArray(analysis.participants)) {
-            throw new Error('Schéma de réponse invalide');
-          }
+        console.log(`✅ Analyse ${analysisId} terminée : ${analysis.participants.length} participants analysés`);
 
-          console.log(`✅ Analyse terminée : ${analysis.participants.length} participants analysés`);
+        // 8. Ajouter les statistiques détaillées de la conversation
+        analysis.conversationStats = {
+          totalMessages: stats.totalMessages,
+          participantCount: stats.participantCount,
+          participants: stats.participants,
+          dateRange: stats.dateRange,
+          durationMonths: stats.durationMonths
+        };
 
-          // 8. Ajouter les statistiques détaillées de la conversation
-          analysis.conversationStats = {
+        // 9. Stocker le résultat dans le Map
+        const resultData = {
+          success: true,
+          stats: {
             totalMessages: stats.totalMessages,
             participantCount: stats.participantCount,
             participants: stats.participants,
             dateRange: stats.dateRange,
             durationMonths: stats.durationMonths
-          };
+          },
+          analysis
+        };
+        
+        const analysisEntry = analysisResults.get(analysisId);
+        if (analysisEntry) {
+          analysisEntry.status = 'completed';
+          analysisEntry.result = resultData;
+          analysisEntry.timestamp = Date.now();
+        }
+        
+        console.log(`💾 Résultat ${analysisId} sauvegardé et prêt`);
+        
+        return resultData;
 
-          // 9. Réponse au client
-          res.json({
-            success: true,
-            stats: {
-              totalMessages: stats.totalMessages,
-              participantCount: stats.participantCount,
-              participants: stats.participants,
-              dateRange: stats.dateRange,
-              durationMonths: stats.durationMonths
-            },
-            analysis
-          });
-
-          resolve();
-
-        } catch (error) {
-          console.error('❌ Erreur:', error.message);
-          console.error('   Stack:', error.stack);
-          
-          // Réponse d'erreur sans détails sensibles
-          res.status(500).json({
+      } catch (error) {
+        console.error(`❌ Erreur analyse ${analysisId}:`, error.message);
+        console.error('   Stack:', error.stack);
+        
+        // Stocker l'erreur dans le Map
+        const analysisEntry = analysisResults.get(analysisId);
+        if (analysisEntry) {
+          analysisEntry.status = 'error';
+          analysisEntry.result = {
             error: 'Erreur lors de l\'analyse',
             message: error.message.includes('API') || error.message.includes('clé')
               ? 'Erreur de configuration du serveur (clé API)'
               : 'Impossible de traiter la conversation',
             debug: process.env.NODE_ENV === 'development' ? error.message : undefined
-          });
+          };
+          analysisEntry.timestamp = Date.now();
+        }
+        
+        return null;
 
-          resolve();
-
-        } finally {
-          // Nettoyage du fichier temporaire
-          if (tempFilePath && fs.existsSync(tempFilePath)) {
-            try {
-              fs.unlinkSync(tempFilePath);
-            } catch (cleanupError) {
-              console.warn('⚠️ Erreur nettoyage fichier:', cleanupError.message);
-            }
+      } finally {
+        // Nettoyage du fichier temporaire
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch (cleanupError) {
+            console.warn('⚠️ Erreur nettoyage fichier:', cleanupError.message);
           }
         }
       }
-    };
+    }
+  };
 
-    analysisQueue.push(task);
-    processAnalysisQueue();
-  });
+  analysisQueue.push(task);
+  processAnalysisQueue();
 });
 
 /**
@@ -451,16 +557,6 @@ Réponds de manière concise et naturelle. Sois drôle quand approprié. Utilise
       message: 'Impossible de générer une réponse. Réessaie dans un instant.'
     });
   }
-});
-
-/**
- * Health check
- */
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok',
-    provider: process.env.LLM_PROVIDER || 'mistral'
-  });
 });
 
 // Middleware de gestion d'erreur Multer (DOIT être après les routes)
