@@ -62,9 +62,15 @@ const MAX_CONCURRENT_ANALYSIS = 50;
 // Format: { analysisId: { status: 'pending'|'completed'|'error', result: data, timestamp: Date } }
 const analysisResults = new Map();
 
-// Tracking des IPs pour limite quotidienne (1 analyse/jour/IP)
-// Format: { ip: { count: number, lastAnalysis: timestamp, resetAt: timestamp } }
+// Tracking des IPs pour limite quotidienne (3 analyses/jour/IP)
+// Format: { ip: { analyses: [{timestamp, resetAt}], count: number } }
 const ipTracking = new Map();
+
+const MAX_ANALYSES_PER_DAY = 3; // Limite de 3 analyses par jour
+
+// 🔄 RESET COMPLET au démarrage du serveur
+console.log('🧹 Reset complet de toutes les IPs enregistrées au démarrage');
+ipTracking.clear();
 
 // Nettoyer les anciens résultats toutes les heures
 setInterval(() => {
@@ -77,11 +83,16 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-// Nettoyer les IPs tous les jours à minuit
+// Nettoyer les IPs expirées toutes les heures
 setInterval(() => {
   const now = Date.now();
   for (const [ip, data] of ipTracking.entries()) {
-    if (now >= data.resetAt) {
+    // Filtrer les analyses expirées (plus de 24h)
+    data.analyses = data.analyses.filter(analysis => now < analysis.resetAt);
+    data.count = data.analyses.length;
+    
+    // Si plus aucune analyse active, supprimer l'IP
+    if (data.analyses.length === 0) {
       ipTracking.delete(ip);
       console.log(`🧹 Reset limite IP: ${ip}`);
     }
@@ -106,18 +117,43 @@ function canAnalyze(ip) {
   const tracking = ipTracking.get(ip);
   
   if (!tracking) {
-    return { allowed: true, remainingTime: 0 };
+    return { 
+      allowed: true, 
+      remainingTime: 0, 
+      remainingAnalyses: MAX_ANALYSES_PER_DAY,
+      usedAnalyses: 0
+    };
   }
   
-  // Si on est après le reset, autoriser
-  if (now >= tracking.resetAt) {
-    ipTracking.delete(ip);
-    return { allowed: true, remainingTime: 0 };
+  // Filtrer les analyses qui ne sont pas encore expirées
+  const activeAnalyses = tracking.analyses.filter(analysis => now < analysis.resetAt);
+  
+  // Mettre à jour le tracking
+  tracking.analyses = activeAnalyses;
+  tracking.count = activeAnalyses.length;
+  
+  // Si on a atteint la limite
+  if (activeAnalyses.length >= MAX_ANALYSES_PER_DAY) {
+    // Trouver l'analyse la plus ancienne pour calculer quand elle expirera
+    const oldestAnalysis = activeAnalyses.sort((a, b) => a.timestamp - b.timestamp)[0];
+    const remainingTime = oldestAnalysis.resetAt - now;
+    
+    return { 
+      allowed: false, 
+      remainingTime,
+      remainingAnalyses: 0,
+      usedAnalyses: activeAnalyses.length,
+      nextResetAt: oldestAnalysis.resetAt
+    };
   }
   
-  // Sinon, refuser et donner le temps restant
-  const remainingTime = tracking.resetAt - now;
-  return { allowed: false, remainingTime, lastAnalysis: tracking.lastAnalysis };
+  // Sinon, autoriser
+  return { 
+    allowed: true, 
+    remainingTime: 0,
+    remainingAnalyses: MAX_ANALYSES_PER_DAY - activeAnalyses.length,
+    usedAnalyses: activeAnalyses.length
+  };
 }
 
 /**
@@ -125,17 +161,22 @@ function canAnalyze(ip) {
  */
 function recordAnalysis(ip) {
   const now = Date.now();
-  // Calculer exactement 24h après l'analyse (pas minuit, mais même heure le lendemain)
   const resetAt = now + (24 * 60 * 60 * 1000); // +24 heures
   
-  ipTracking.set(ip, {
-    count: 1,
-    lastAnalysis: now,
+  const tracking = ipTracking.get(ip) || { analyses: [], count: 0 };
+  
+  // Ajouter la nouvelle analyse
+  tracking.analyses.push({
+    timestamp: now,
     resetAt: resetAt
   });
   
+  tracking.count = tracking.analyses.length;
+  
+  ipTracking.set(ip, tracking);
+  
   const resetDate = new Date(resetAt);
-  console.log(`📊 Analyse enregistrée pour IP: ${ip}, reset à ${resetDate.toISOString()}`);
+  console.log(`📊 Analyse ${tracking.count}/${MAX_ANALYSES_PER_DAY} enregistrée pour IP: ${ip}, expire à ${resetDate.toISOString()}`);
 }
 
 async function processAnalysisQueue() {
@@ -178,12 +219,15 @@ app.get('/ping', (req, res) => {
  */
 app.get('/api/can-analyze', (req, res) => {
   const ip = getClientIp(req);
-  const { allowed, remainingTime, lastAnalysis } = canAnalyze(ip);
+  const { allowed, remainingTime, remainingAnalyses, usedAnalyses, nextResetAt } = canAnalyze(ip);
   
   res.json({
     allowed,
     remainingTime,
-    lastAnalysis,
+    remainingAnalyses,
+    usedAnalyses,
+    maxAnalysesPerDay: MAX_ANALYSES_PER_DAY,
+    nextResetAt,
     ip: process.env.NODE_ENV === 'development' ? ip : undefined // Debug only
   });
 });
