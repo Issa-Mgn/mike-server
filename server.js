@@ -62,6 +62,10 @@ const MAX_CONCURRENT_ANALYSIS = 50;
 // Format: { analysisId: { status: 'pending'|'completed'|'error', result: data, timestamp: Date } }
 const analysisResults = new Map();
 
+// Tracking des IPs pour limite quotidienne (1 analyse/jour/IP)
+// Format: { ip: { count: number, lastAnalysis: timestamp, resetAt: timestamp } }
+const ipTracking = new Map();
+
 // Nettoyer les anciens résultats toutes les heures
 setInterval(() => {
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
@@ -72,6 +76,66 @@ setInterval(() => {
     }
   }
 }, 60 * 60 * 1000);
+
+// Nettoyer les IPs tous les jours à minuit
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, data] of ipTracking.entries()) {
+    if (now >= data.resetAt) {
+      ipTracking.delete(ip);
+      console.log(`🧹 Reset limite IP: ${ip}`);
+    }
+  }
+}, 60 * 60 * 1000); // Check toutes les heures
+
+/**
+ * Obtenir l'IP du client
+ */
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+         req.headers['x-real-ip'] ||
+         req.socket.remoteAddress ||
+         req.connection.remoteAddress;
+}
+
+/**
+ * Vérifier si l'IP peut faire une analyse
+ */
+function canAnalyze(ip) {
+  const now = Date.now();
+  const tracking = ipTracking.get(ip);
+  
+  if (!tracking) {
+    return { allowed: true, remainingTime: 0 };
+  }
+  
+  // Si on est après le reset, autoriser
+  if (now >= tracking.resetAt) {
+    ipTracking.delete(ip);
+    return { allowed: true, remainingTime: 0 };
+  }
+  
+  // Sinon, refuser et donner le temps restant
+  const remainingTime = tracking.resetAt - now;
+  return { allowed: false, remainingTime, lastAnalysis: tracking.lastAnalysis };
+}
+
+/**
+ * Enregistrer une analyse pour une IP
+ */
+function recordAnalysis(ip) {
+  const now = Date.now();
+  const tomorrow = new Date();
+  tomorrow.setHours(24, 0, 0, 0); // Minuit du lendemain
+  
+  ipTracking.set(ip, {
+    count: 1,
+    lastAnalysis: now,
+    resetAt: tomorrow.getTime()
+  });
+  
+  console.log(`📊 Analyse enregistrée pour IP: ${ip}, reset à ${tomorrow.toISOString()}`);
+}
 
 async function processAnalysisQueue() {
   while (analysisQueue.length > 0 && activeAnalysis < MAX_CONCURRENT_ANALYSIS) {
@@ -106,6 +170,21 @@ app.get('/api/health', (req, res) => {
  */
 app.get('/ping', (req, res) => {
   res.send('pong');
+});
+
+/**
+ * Vérifier si l'utilisateur peut faire une analyse (limite quotidienne)
+ */
+app.get('/api/can-analyze', (req, res) => {
+  const ip = getClientIp(req);
+  const { allowed, remainingTime, lastAnalysis } = canAnalyze(ip);
+  
+  res.json({
+    allowed,
+    remainingTime,
+    lastAnalysis,
+    ip: process.env.NODE_ENV === 'development' ? ip : undefined // Debug only
+  });
 });
 
 /**
@@ -238,16 +317,34 @@ app.get('/api/analysis/:analysisId/result', (req, res) => {
  * Retourne immédiatement un analysisId pour permettre le polling
  */
 app.post('/api/analyze', upload.single('conversation'), async (req, res) => {
+  // Vérifier la limite quotidienne par IP
+  const ip = getClientIp(req);
+  const { allowed, remainingTime, lastAnalysis } = canAnalyze(ip);
+  
+  if (!allowed) {
+    console.log(`🚫 Limite atteinte pour IP: ${ip}, reste ${Math.floor(remainingTime / 1000 / 60)} minutes`);
+    return res.status(429).json({
+      error: 'Limite quotidienne atteinte',
+      message: 'Vous avez déjà effectué une analyse aujourd\'hui. Revenez demain !',
+      remainingTime,
+      lastAnalysis,
+      resetAt: lastAnalysis + (24 * 60 * 60 * 1000)
+    });
+  }
+  
   // Générer un ID unique pour cette analyse
   const analysisId = require('crypto').randomUUID();
   
-  console.log(`📥 Nouvelle analyse créée: ${analysisId}`);
+  console.log(`📥 Nouvelle analyse créée: ${analysisId} (IP: ${ip})`);
   console.log('   Fichier:', req.file ? req.file.originalname : 'aucun');
   
   if (!req.file) {
     console.log('❌ Aucun fichier uploadé');
     return res.status(400).json({ error: 'Aucun fichier uploadé' });
   }
+  
+  // Enregistrer l'analyse pour cette IP
+  recordAnalysis(ip);
   
   // Initialiser le statut de l'analyse
   analysisResults.set(analysisId, {
